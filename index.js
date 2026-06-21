@@ -1,73 +1,187 @@
-const express = require("express");
-const axios = require("axios");
-const Anthropic = require("@anthropic-ai/sdk");
-
+const express = require('express');
 const app = express();
 app.use(express.json());
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const PORT = process.env.PORT || 3000;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
-// ✅ Verificación del webhook (GET)
-app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
+// ===========================================
+// AQUÍ DEFINES LA PERSONALIDAD / INSTRUCCIONES
+// DEL AGENTE. Esto es "programar las respuestas".
+// ===========================================
+const SYSTEM_PROMPT = `Eres Adri, la asistente virtual de Fábrica de Sonrisas, una clínica dental.
 
-  if (mode === "subscribe" && token === process.env.VERIFY_TOKEN) {
-    console.log("Webhook verificado ✅");
+TONO: Amable, cordial, cálido y mexicano. Cercano pero profesional. Respuestas breves (máximo 4-5 líneas), claras y fáciles de leer en WhatsApp. Puedes usar emojis con moderación (🦷😊) pero sin exagerar.
+
+SERVICIOS QUE OFRECEMOS:
+- Implantes dentales
+- Brackets (metálicos, estéticos, invisaling, etc.)
+- Extracciones
+- Cirugías de terceros molares
+- Blanqueamientos
+- Limpieza dental
+
+Si preguntan por nuestros servicios en general, responde:
+"Contamos con diferentes servicios como:
+- Implantes dentales
+- Brackets metálicos, estéticos, invisaling, etc.
+- Extracciones
+- Cirugías de terceros molares
+- Blanqueamientos
+- Limpieza dental
+¿Sobre cuál te gustaría que te dé más información?"
+
+Si preguntan por IMPLANTES DENTALES o su precio, responde:
+"El costo de nuestros implantes dentales es de $7,999 MXN. Incluye:
+- Valoración
+- Implante
+- Cirugía de implantación
+- Seguimiento personalizado
+- Terapia Láser"
+
+Si preguntan cuánto cuesta la VALORACIÓN, responde:
+"La valoración no tiene costo, solo debes pagar tu radiografía panorámica."
+
+Si preguntan por nuestros HORARIOS, responde:
+"Nuestros horarios son:
+- Lunes a viernes de 09:00 a 19:00 horas
+- Sábados de 09:00 a 15:00 horas"
+
+Si preguntan por la PROMOCIÓN DE BRACKETS, responde:
+"El costo de nuestra promoción de brackets metálicos es la siguiente:
+- Mensualidades desde $699 MXN
+- Colocación sin costo
+Solo pagarías tus estudios básicos de ortodoncia, pues son necesarios para asegurar la efectividad de tu tratamiento."
+
+Si preguntan por BLANQUEAMIENTO o LIMPIEZA DENTAL, responde:
+"Contamos con una promoción de 2x1. Puede aplicar en pareja o combinada: puedes elegir un blanqueamiento y una limpieza para una sola persona, o un tratamiento individual para 2 personas."
+
+Si preguntan por la UBICACIÓN o DIRECCIÓN, responde:
+"Estamos ubicados en Torres Adalid 205, INT 201, Colonia Del Valle, a unos cuantos metros del MetroBus Poliforum. https://maps.app.goo.gl/SHD3EyM5Prj8JWu7A"
+
+REGLAS:
+- Siempre responde en español, con el tono mexicano descrito arriba.
+- Si preguntan algo que no está en esta información (por ejemplo disponibilidad de citas o dudas médicas específicas), sé honesta y ofrece conectar con alguien del equipo, por ejemplo: "Esa información mejor te la confirma alguien de nuestro equipo, ¿quieres que te conecte? 😊"
+- Nunca inventes precios, servicios o promociones que no estén aquí.
+- Si el paciente parece interesado en agendar, anímalo a confirmar fecha y hora con el equipo.`;
+
+// Memoria simple en RAM por número de teléfono (se borra si Railway reinicia)
+const conversationHistory = {};
+
+// ============ VERIFICACIÓN DEL WEBHOOK (Meta lo llama una vez) ============
+app.get('/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    console.log('Webhook verificado correctamente');
     res.status(200).send(challenge);
   } else {
     res.sendStatus(403);
   }
 });
 
-// 📨 Recibir mensajes (POST)
-app.post("/webhook", async (req, res) => {
-  res.sendStatus(200); // Responder inmediatamente a Meta
+// ============ RECEPCIÓN DE MENSAJES ============
+app.post('/webhook', async (req, res) => {
+  res.sendStatus(200); // responder rápido a Meta, procesar después
 
   try {
     const entry = req.body.entry?.[0];
-    const change = entry?.changes?.[0]?.value;
-    const message = change?.messages?.[0];
+    const change = entry?.changes?.[0];
+    const message = change?.value?.messages?.[0];
 
-    if (!message || message.type !== "text") return;
+    if (!message) return; // puede ser un evento de "leído", lo ignoramos
 
-    const from = message.from;
-    const userText = message.text.body;
+    const from = message.from; // número del usuario
+    const userText = message.text?.body;
+
+    if (!userText) return; // ignoramos imágenes/audios por ahora
+
     console.log(`Mensaje de ${from}: ${userText}`);
 
-    // Llamar a Claude
-    const response = await client.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 500,
-      messages: [{ role: "user", content: userText }],
-      system: "Eres un asistente útil que responde por WhatsApp. Sé conciso y amigable."
-    });
+    // Reglas fijas ANTES de llamar a Claude (opcional)
+    // Ejemplo: respuesta instantánea sin gastar tokens de Claude
+    const lower = userText.toLowerCase().trim();
+    if (lower === 'humano' || lower === 'agente') {
+      await sendWhatsAppMessage(from, 'Te voy a conectar con una persona de nuestro equipo, en breve te contactan 🙌');
+      return;
+    }
 
-    const reply = response.content[0].text;
+    // Mantener historial corto por usuario (últimos 6 mensajes)
+    if (!conversationHistory[from]) conversationHistory[from] = [];
+    conversationHistory[from].push({ role: 'user', content: userText });
+    conversationHistory[from] = conversationHistory[from].slice(-6);
 
-    // Enviar respuesta por WhatsApp
-    await axios.post(
-      `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: "whatsapp",
-        to: from,
-        type: "text",
-        text: { body: reply }
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
+    const claudeReply = await askClaude(conversationHistory[from]);
 
-    console.log(`Respuesta enviada a ${from} ✅`);
+    conversationHistory[from].push({ role: 'assistant', content: claudeReply });
+
+    await sendWhatsAppMessage(from, claudeReply);
   } catch (err) {
-    console.error("Error:", err.message);
+    console.error('Error procesando mensaje:', err);
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
+// ============ LLAMAR A CLAUDE ============
+async function askClaude(messages) {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 500,
+      system: SYSTEM_PROMPT,
+      messages: messages,
+    }),
+  });
+
+  const data = await response.json();
+
+  if (data.error) {
+    console.error('Error de Claude API:', data.error);
+    return 'Disculpa, tuve un problema técnico. ¿Puedes intentar de nuevo en un momento?';
+  }
+
+  return data.content[0].text;
+}
+
+// ============ ENVIAR MENSAJE POR WHATSAPP ============
+async function sendWhatsAppMessage(to, text) {
+  const response = await fetch(
+    `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: to,
+        text: { body: text },
+      }),
+    }
+  );
+
+  const data = await response.json();
+  if (data.error) {
+    console.error('Error enviando mensaje de WhatsApp:', data.error);
+  }
+  return data;
+}
+
+app.get('/', (req, res) => {
+  res.send('Bot de WhatsApp con Claude funcionando ✅');
+});
+
+app.listen(PORT, () => {
+  console.log(`Servidor corriendo en puerto ${PORT}`);
+});
