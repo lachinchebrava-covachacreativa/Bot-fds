@@ -1,4 +1,5 @@
 const express = require('express');
+const { crearCita, verificarDisponibilidad } = require('./calendar');
 const app = express();
 app.use(express.json());
 
@@ -62,11 +63,54 @@ Si preguntan por BLANQUEAMIENTO o LIMPIEZA DENTAL, responde:
 Si preguntan por la UBICACIÓN o DIRECCIÓN, responde:
 "Estamos ubicados en Torres Adalid 205, INT 201, Colonia Del Valle, a unos cuantos metros del MetroBus Poliforum. https://maps.app.goo.gl/SHD3EyM5Prj8JWu7A"
 
+AGENDAR CITAS:
+Si el paciente quiere agendar una cita:
+1. Pregunta su nombre completo (si no lo sabes ya).
+2. Pregunta qué día y hora prefiere, dentro de nuestros horarios (Lunes a viernes 09:00-19:00, Sábados 09:00-15:00).
+3. Pregunta brevemente el motivo de la cita (ej. implante, valoración, brackets, etc.)
+4. Cuando tengas nombre, fecha, hora y motivo, usa la herramienta "verificar_disponibilidad" para confirmar que el horario está libre.
+5. Si está disponible, usa la herramienta "agendar_cita" para crearla, y confirma al paciente con un mensaje cálido.
+6. Si NO está disponible, dile amablemente y pide que elija otro horario.
+- Siempre usa el año 2026 si el paciente no especifica año.
+- Nunca agendes fuera de nuestros horarios de atención.
+
 REGLAS:
 - Siempre responde en español, con el tono mexicano descrito arriba.
-- Si preguntan algo que no está en esta información (por ejemplo disponibilidad de citas o dudas médicas específicas), sé honesta y ofrece conectar con alguien del equipo, por ejemplo: "Esa información mejor te la confirma alguien de nuestro equipo, ¿quieres que te conecte? 😊"
-- Nunca inventes precios, servicios o promociones que no estén aquí.
-- Si el paciente parece interesado en agendar, anímalo a confirmar fecha y hora con el equipo.`;
+- Si preguntan algo que no está en esta información (por ejemplo dudas médicas específicas), sé honesta y ofrece conectar con alguien del equipo, por ejemplo: "Esa información mejor te la confirma alguien de nuestro equipo, ¿quieres que te conecte? 😊"
+- Nunca inventes precios, servicios o promociones que no estén aquí.`;
+
+// ===========================================
+// DEFINICIÓN DE HERRAMIENTAS (TOOLS) PARA CLAUDE
+// ===========================================
+const TOOLS = [
+  {
+    name: 'verificar_disponibilidad',
+    description: 'Verifica si un horario específico está disponible en el calendario de citas antes de agendar.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        fechaHoraInicio: { type: 'string', description: 'Fecha y hora de inicio en formato ISO, ej: 2026-06-25T10:00:00' },
+        fechaHoraFin: { type: 'string', description: 'Fecha y hora de fin en formato ISO, ej: 2026-06-25T11:00:00 (asume 1 hora de duración si no se especifica)' },
+      },
+      required: ['fechaHoraInicio', 'fechaHoraFin'],
+    },
+  },
+  {
+    name: 'agendar_cita',
+    description: 'Crea una cita en el calendario de la clínica una vez confirmada la disponibilidad y todos los datos del paciente.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        paciente: { type: 'string', description: 'Nombre completo del paciente' },
+        telefono: { type: 'string', description: 'Número de teléfono del paciente' },
+        motivo: { type: 'string', description: 'Motivo de la cita (ej. implante, valoración, brackets)' },
+        fechaHoraInicio: { type: 'string', description: 'Fecha y hora de inicio en formato ISO' },
+        fechaHoraFin: { type: 'string', description: 'Fecha y hora de fin en formato ISO' },
+      },
+      required: ['paciente', 'telefono', 'motivo', 'fechaHoraInicio', 'fechaHoraFin'],
+    },
+  },
+];
 
 // Memoria simple en RAM por número de teléfono (se borra si Railway reinicia)
 const conversationHistory = {};
@@ -104,7 +148,6 @@ app.post('/webhook', async (req, res) => {
     console.log(`Mensaje de ${from}: ${userText}`);
 
     // Reglas fijas ANTES de llamar a Claude (opcional)
-    // Ejemplo: respuesta instantánea sin gastar tokens de Claude
     const lower = userText.toLowerCase().trim();
     if (lower === 'humano' || lower === 'agente') {
       await sendWhatsAppMessage(from, 'Te voy a conectar con una persona de nuestro equipo, en breve te contactan 🙌');
@@ -116,7 +159,7 @@ app.post('/webhook', async (req, res) => {
     conversationHistory[from].push({ role: 'user', content: userText });
     conversationHistory[from] = conversationHistory[from].slice(-6);
 
-    const claudeReply = await askClaude(conversationHistory[from]);
+    const claudeReply = await askClaude(conversationHistory[from], from);
 
     conversationHistory[from].push({ role: 'assistant', content: claudeReply });
 
@@ -126,31 +169,89 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// ============ LLAMAR A CLAUDE ============
-async function askClaude(messages) {
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 500,
-      system: SYSTEM_PROMPT,
-      messages: messages,
-    }),
-  });
+// ============ LLAMAR A CLAUDE (con soporte de tools) ============
+async function askClaude(messages, telefonoUsuario) {
+  let currentMessages = [...messages];
 
-  const data = await response.json();
+  // Loop para permitir que Claude use herramientas y luego responda con el resultado
+  for (let i = 0; i < 4; i++) { // límite de 4 vueltas por seguridad
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 800,
+        system: SYSTEM_PROMPT,
+        messages: currentMessages,
+        tools: TOOLS,
+      }),
+    });
 
-  if (data.error) {
-    console.error('Error de Claude API:', data.error);
-    return 'Disculpa, tuve un problema técnico. ¿Puedes intentar de nuevo en un momento?';
+    const data = await response.json();
+
+    if (data.error) {
+      console.error('Error de Claude API:', data.error);
+      return 'Disculpa, tuve un problema técnico. ¿Puedes intentar de nuevo en un momento?';
+    }
+
+    // Si Claude quiere usar una herramienta
+    if (data.stop_reason === 'tool_use') {
+      const toolUseBlock = data.content.find((b) => b.type === 'tool_use');
+      const toolResult = await ejecutarHerramienta(toolUseBlock, telefonoUsuario);
+
+      // Agregamos la respuesta de Claude (con la solicitud de tool) y el resultado al historial de ESTA llamada
+      currentMessages.push({ role: 'assistant', content: data.content });
+      currentMessages.push({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: toolUseBlock.id,
+            content: JSON.stringify(toolResult),
+          },
+        ],
+      });
+      continue; // volvemos a llamar a Claude con el resultado de la herramienta
+    }
+
+    // Respuesta final de texto
+    const textBlock = data.content.find((b) => b.type === 'text');
+    return textBlock ? textBlock.text : 'Disculpa, no entendí bien tu mensaje. ¿Puedes repetirlo?';
   }
 
-  return data.content[0].text;
+  return 'Disculpa, tuve un problema procesando tu solicitud. ¿Puedes intentar de nuevo?';
+}
+
+// ============ EJECUTAR HERRAMIENTAS ============
+async function ejecutarHerramienta(toolUseBlock, telefonoUsuario) {
+  const { name, input } = toolUseBlock;
+
+  try {
+    if (name === 'verificar_disponibilidad') {
+      const disponible = await verificarDisponibilidad(input.fechaHoraInicio, input.fechaHoraFin);
+      return { disponible };
+    }
+
+    if (name === 'agendar_cita') {
+      const evento = await crearCita({
+        paciente: input.paciente,
+        telefono: input.telefono || telefonoUsuario,
+        motivo: input.motivo,
+        fechaHoraInicio: input.fechaHoraInicio,
+        fechaHoraFin: input.fechaHoraFin,
+      });
+      return { exito: true, eventoId: evento.id };
+    }
+
+    return { error: 'Herramienta no reconocida' };
+  } catch (err) {
+    console.error(`Error ejecutando herramienta ${name}:`, err);
+    return { error: 'No se pudo completar la acción en el calendario' };
+  }
 }
 
 // ============ ENVIAR MENSAJE POR WHATSAPP ============
