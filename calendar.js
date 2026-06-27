@@ -1,6 +1,4 @@
-Esto significa que el archivo calendar.js quedó incompleto al guardarlo — probablemente se cortó al copiar/pegar y le faltan llaves de cierre } al final. Por eso Node no puede ni siquiera cargar el módulo (es un error de sintaxis, ni llega a ejecutarse).
-Solución: reemplaza todo el contenido de calendar.js con esto completo (verifica que se copie hasta la última línea, incluyendo el module.exports):
-jsconst { google } = require('googleapis');
+const { google } = require('googleapis');
 
 const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL;
 const GOOGLE_PRIVATE_KEY = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n');
@@ -46,13 +44,3 @@ async function crearCita({ paciente, telefono, motivo, fechaHoraInicio, fechaHor
 async function verificarDisponibilidad(fechaHoraInicio, fechaHoraFin) {
   const respuesta = await calendar.events.list({
     calendarId: GOOGLE_CALENDAR_ID,
-    timeMin: fechaHoraInicio,
-    timeMax: fechaHoraFin,
-    timeZone: 'America/Mexico_City',
-    singleEvents: true,
-  });
-
-  return respuesta.data.items.length === 0;
-}
-
-module.exports = { crearCita, verificarDisponibilidad };
