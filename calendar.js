@@ -1,7 +1,10 @@
 const { google } = require('googleapis');
 
 const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL;
-const GOOGLE_PRIVATE_KEY = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n');
+const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || '')
+  .replace(/\\n/g, '\n')   // convierte \n literal a salto de línea real
+  .replace(/"/g, '')        // elimina comillas si las hubiera
+  .trim();
 const GOOGLE_CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID;
 
 const auth = new google.auth.JWT(
