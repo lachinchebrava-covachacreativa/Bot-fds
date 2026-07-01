@@ -13,6 +13,9 @@ const auth = new google.auth.JWT(
 
 const calendar = google.calendar({ version: 'v3', auth });
 
+// Crea una cita. fechaHoraInicio y fechaHoraFin en formato ISO, ej: "2026-06-25T10:00:00"
+// Verifica disponibilidad internamente antes de crear, para nunca duplicar citas
+// aunque el agente no haya llamado a verificarDisponibilidad antes.
 async function crearCita({ paciente, telefono, motivo, fechaHoraInicio, fechaHoraFin }) {
   const libre = await verificarDisponibilidad(fechaHoraInicio, fechaHoraFin);
 
@@ -41,16 +44,24 @@ async function crearCita({ paciente, telefono, motivo, fechaHoraInicio, fechaHor
   return respuesta.data;
 }
 
+// Convierte fecha ISO sin zona horaria a formato con offset de Ciudad de México (-06:00)
+function agregarZonaHoraria(fechaISO) {
+  if (fechaISO.includes('+') || fechaISO.includes('Z') || /\d{2}:\d{2}$/.test(fechaISO.slice(-6))) {
+    return fechaISO; // ya tiene zona horaria
+  }
+  return fechaISO + '-06:00';
+}
+
+// Revisa si hay algo agendado en ese rango (para validar disponibilidad)
 async function verificarDisponibilidad(fechaHoraInicio, fechaHoraFin) {
   const respuesta = await calendar.events.list({
     calendarId: GOOGLE_CALENDAR_ID,
-    timeMin: fechaHoraInicio,
-    timeMax: fechaHoraFin,
-    timeZone: 'America/Mexico_City',
+    timeMin: agregarZonaHoraria(fechaHoraInicio),
+    timeMax: agregarZonaHoraria(fechaHoraFin),
     singleEvents: true,
   });
 
-  return respuesta.data.items.length === 0;
+  return respuesta.data.items.length === 0; // true = disponible
 }
 
 module.exports = { crearCita, verificarDisponibilidad };
